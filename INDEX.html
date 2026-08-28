@@ -1347,32 +1347,60 @@ function showIssuePopups(){
 }
 // ── 증빙자료 폴더 자동탐색(HPPK DOC 폴더와 동일 방식) ──
 //   저장소  특정이슈증빙/<관리번호>/  폴더에 파일을 올리고 Push하면 자동으로 연결·표시됨.
-const GH_OWNER='kinof2018-create', GH_REPO='HP-IN-MH4', GH_BRANCH='main', ISSUE_EVID_BASE='특정이슈증빙';
+let GH_OWNER='kinof2018-create', GH_REPO='HP-IN-MH4';           // GitHub API 보완용(아래에서 배포주소로 자동보정)
+const GH_BRANCH='main', ISSUE_EVID_BASE='특정이슈증빙';
+// GitHub Pages 로 열려 있으면 실제 배포 저장소(사용자/저장소명)를 주소에서 자동으로 알아냄
+//  → 이 대시보드가 어느 저장소에 올라가 있든 GitHub API 보완이 올바른 저장소를 가리킴.
+(function(){ try{
+  const h=location.hostname||'', seg=(location.pathname||'').split('/').filter(Boolean);
+  const m=h.match(/^([^.]+)\.github\.io$/i);
+  if(m){ GH_OWNER=m[1]; if(seg.length>=1) GH_REPO=seg[0]; }
+}catch(e){} })();
 let ISSUE_EVID_INDEX=null;   // { 정규화된관리번호: [ {name,path}, ... ] }
 function evidFolderKey(s){ return String(s==null?'':s).toUpperCase().replace(/[\s_\-]/g,''); }
-async function loadIssueEvidIndex(){
-  const api='https://api.github.com/repos/'+GH_OWNER+'/'+GH_REPO+'/git/trees/'+GH_BRANCH+'?recursive=1';
-  const idx={};
+// 파일 경로 하나를 인덱스에 추가 (특정이슈증빙/<관리번호>/<파일> 만 대상, 안내·기타 제외)
+function addEvidPath(idx, p){
+  const parts=String(p||'').split('/');
+  if(parts.length<3) return;
+  if(parts[0]!==ISSUE_EVID_BASE) return;                         // 특정이슈증빙/ 하위만
+  const file=parts[parts.length-1];
+  if(/^\.gitkeep$/i.test(file)) return;
+  if(/^_manifest\.json$/i.test(file)) return;                    // 목록 파일 자체는 제외
+  if(/(읽어주세요|여기에|안내|readme)/i.test(file)) return;      // 안내용 텍스트는 제외
+  const key=evidFolderKey(parts[1]);
+  const arr=(idx[key]=idx[key]||[]);
+  if(!arr.some(x=>x.path===p)) arr.push({name:file, path:p});    // 중복 방지
+}
+// 1순위: 저장소가 함께 배포하는 목록 파일(_manifest.json)을 같은 주소에서 읽음.
+//   GitHub API 사용량 제한/차단과 무관하게 항상 동작(회사 공용 인터넷 등에서도 안전).
+async function loadEvidFromManifest(idx){
   try{
+    const res=await fetch('./'+ISSUE_EVID_BASE.split('/').map(encodeURIComponent).join('/')+'/_manifest.json?t='+Date.now(),{cache:'no-store'});
+    if(!res.ok) return false;
+    const data=await res.json();
+    (data.files||[]).forEach(function(p){ addEvidPath(idx,p); });
+    return true;
+  }catch(err){ return false; }
+}
+// 2순위(보완): GitHub API로 최신 파일까지 반영(목록 파일이 아직 갱신 전이어도 표시).
+async function loadEvidFromGithub(idx){
+  try{
+    const api='https://api.github.com/repos/'+GH_OWNER+'/'+GH_REPO+'/git/trees/'+GH_BRANCH+'?recursive=1';
     const res=await fetch(api,{headers:{'Accept':'application/vnd.github+json'}});
     if(!res.ok) throw new Error('HTTP '+res.status);
     const data=await res.json();
-    (data.tree||[]).forEach(function(node){
-      if(node.type!=='blob') return;
-      const p=node.path||''; const parts=p.split('/');
-      if(parts.length<3) return;
-      if(parts[0]!==ISSUE_EVID_BASE) return;                       // 특정이슈증빙/ 하위만
-      const file=parts[parts.length-1];
-      if(/^\.gitkeep$/i.test(file)) return;
-      if(/(읽어주세요|여기에|안내|readme)/i.test(file)) return;    // 안내용 텍스트는 제외
-      const key=evidFolderKey(parts[1]);
-      (idx[key]=idx[key]||[]).push({name:file, path:p});
-    });
-    ISSUE_EVID_INDEX=idx;
-  }catch(err){
-    console.warn('특정이슈 증빙자료 목록을 불러오지 못했습니다:', err&&err.message);
-    ISSUE_EVID_INDEX={};   // 실패해도 나머지는 정상 동작
+    (data.tree||[]).forEach(function(node){ if(node.type==='blob') addEvidPath(idx,node.path||''); });
+    return true;
+  }catch(err){ return false; }
+}
+async function loadIssueEvidIndex(){
+  const idx={};
+  const okManifest = await loadEvidFromManifest(idx);   // 1순위: 같은 주소의 목록 파일
+  const okGithub   = await loadEvidFromGithub(idx);     // 2순위: GitHub API로 보완
+  if(!okManifest && !okGithub){
+    console.warn('특정이슈 증빙자료 목록을 불러오지 못했습니다.');
   }
+  ISSUE_EVID_INDEX=idx;    // 두 경로 중 하나라도 성공하면 그 결과 사용(실패해도 나머지 정상 동작)
   showIssuePopups();       // 인덱스 반영해 팝업/버튼 다시 그림
 }
 // 증빙자료 URL 해석: http(s)면 그대로, 아니면 저장소 상대경로
